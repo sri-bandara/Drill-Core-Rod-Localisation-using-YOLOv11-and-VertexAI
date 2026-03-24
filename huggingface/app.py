@@ -166,7 +166,7 @@ with gr.Blocks(title="Drill Core Rod Localisation", css=CUSTOM_CSS) as demo:
     gr.HTML(
         """
         <div class="section-note">
-            Built with YOLO + Gradio · Supports upload, paste, and sample images
+            To understand the assumptions and limitations of this model, please visit the<a href="https://github.com/sri-bandara/Drill-Core-Rod-Localisation-using-YOLOv11-and-VertexAI/" target="_blank" style="color: #90D5FF; text-decoration: none;">GitHub repository.</a>
         </div>
         """
     )
