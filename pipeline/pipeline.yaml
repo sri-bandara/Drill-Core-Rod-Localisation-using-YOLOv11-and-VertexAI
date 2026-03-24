@@ -1,0 +1,383 @@
+# PIPELINE DEFINITION
+# Name: drill-core-yolo-pipeline
+# Description: Validates data, trains YOLO, evaluates, and registers model (conditional) to model registry
+# Inputs:
+#    bucket_name: str [Default: 'drill-core-sri']
+#    epochs: int [Default: 60.0]
+#    imgsz: int [Default: 640.0]
+#    model_version: str [Default: 'v1']
+components:
+  comp-condition-1:
+    dag:
+      tasks:
+        register-model:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-register-model
+          inputs:
+            parameters:
+              bucket_name:
+                componentInputParameter: pipelinechannel--bucket_name
+              location:
+                runtimeValue:
+                  constant: australia-southeast1
+              map50:
+                componentInputParameter: pipelinechannel--evaluate-model-Output
+              model_version:
+                componentInputParameter: pipelinechannel--model_version
+              project:
+                runtimeValue:
+                  constant: drill-core-object-detection
+          taskInfo:
+            name: register-model
+    inputDefinitions:
+      parameters:
+        pipelinechannel--bucket_name:
+          parameterType: STRING
+        pipelinechannel--evaluate-model-Output:
+          parameterType: NUMBER_DOUBLE
+        pipelinechannel--model_version:
+          parameterType: STRING
+  comp-evaluate-model:
+    executorLabel: exec-evaluate-model
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        model_version:
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: NUMBER_DOUBLE
+  comp-register-model:
+    executorLabel: exec-register-model
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        location:
+          parameterType: STRING
+        map50:
+          parameterType: NUMBER_DOUBLE
+        model_version:
+          parameterType: STRING
+        project:
+          parameterType: STRING
+  comp-train-model:
+    executorLabel: exec-train-model
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        epochs:
+          parameterType: NUMBER_INTEGER
+        imgsz:
+          parameterType: NUMBER_INTEGER
+        model_version:
+          parameterType: STRING
+  comp-validate-data:
+    executorLabel: exec-validate-data
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        dataset_prefix:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: BOOLEAN
+defaultPipelineRoot: gs://drill-core-sri/pipeline-runs
+deploymentSpec:
+  executors:
+    exec-evaluate-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate_model(\n    bucket_name: str,\n    model_version: str,\n\
+          \    metrics: Output[Metrics], #used to log evaluation metrics to Vertex\
+          \ AI Experiments\n) -> float: #returns mAP50 as a float so the pipeline\
+          \ can decide whether to deploy\n    \"\"\"\n    Downloads best.pt from GCS\
+          \ and runs it against test set\n    Logs mAP50, precision and recall to\
+          \ Vertex AI Experiments\n    Returns mAP50 as a float so the pipeline can\
+          \ decide whether to deploy\n    \"\"\"\n    import os\n    import yaml\n\
+          \    from google.cloud import storage\n    from ultralytics import YOLO\n\
+          \n    client = storage.Client()\n    bucket = client.bucket(bucket_name)\n\
+          \n    print(\"Downloading trained model from GCS...\")\n    os.makedirs(\"\
+          /tmp/model\", exist_ok=True)\n    bucket.blob(f\"models/{model_version}/best.pt\"\
+          ).download_to_filename(\n        \"/tmp/model/best.pt\"\n    )\n\n    print(\"\
+          Downloading test dataset from GCS...\")\n    blobs = bucket.list_blobs(prefix=\"\
+          datasets/v1/\")\n    for blob in blobs:\n        if blob.name.endswith(\"\
+          /\"):\n            continue\n        local_path = blob.name.replace(\"datasets/v1/\"\
+          , \"/tmp/dataset/\")\n        os.makedirs(os.path.dirname(local_path), exist_ok=True)\n\
+          \        blob.download_to_filename(local_path)\n\n    yaml_content = {\n\
+          \        \"train\": \"/tmp/dataset/train\",\n        \"val\":   \"/tmp/dataset/val\"\
+          ,\n        \"test\":  \"/tmp/dataset/test\",\n        \"nc\":    1,\n  \
+          \      \"names\": [\"box\"]\n    }\n    with open(\"/tmp/dataset/data.yaml\"\
+          , \"w\") as f:\n        yaml.dump(yaml_content, f)\n\n    print(\"Running\
+          \ evaluation on test set...\")\n    model = YOLO(\"/tmp/model/best.pt\"\
+          )\n    results = model.val(data=\"/tmp/dataset/data.yaml\", split=\"test\"\
+          )\n\n    map50     = float(results.box.map50)\n    precision = float(results.box.mp)\n\
+          \    recall    = float(results.box.mr)\n\n    print(f\"Results \u2014 mAP50:\
+          \ {map50:.4f}  Precision: {precision:.4f}  Recall: {recall:.4f}\")\n\n \
+          \   #log metrics to Vertex AI Experiments\n    metrics.log_metric(\"mAP50\"\
+          ,     map50)\n    metrics.log_metric(\"precision\", precision)\n    metrics.log_metric(\"\
+          recall\",    recall)\n\n    return map50\n\n"
+        image: australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v2
+        resources:
+          cpuLimit: 4.0
+          memoryLimit: 8.0
+          resourceCpuLimit: '4'
+          resourceMemoryLimit: 8G
+    exec-register-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - register_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef register_model(\n    bucket_name: str,\n    model_version: str,\n\
+          \    project: str,\n    location: str,\n    map50: float,\n):\n    \"\"\"\
+          \n    Registers the trained model in Vertex AI Model Registry.\n    Attaches\
+          \ the mAP50 score as metadata so you can compare versions\n    \"\"\"\n\
+          \    from google.cloud import aiplatform\n\n    aiplatform.init(project=project,\
+          \ location=location)\n\n    model_uri = f\"gs://{bucket_name}/models/{model_version}\"\
+          \n\n    print(f\"Registering model version {model_version}...\")\n    print(f\"\
+          Model weights at: {model_uri}\")\n\n    model = aiplatform.Model.upload(\
+          \ #registers the model in Vertex AI Model Registry\n        display_name=f\"\
+          drill-core-yolo-{model_version}\",\n        artifact_uri=model_uri,\n  \
+          \      serving_container_image_uri=\"australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v2\"\
+          ,\n        labels={\n            \"version\": model_version,\n         \
+          \   \"framework\": \"yolo\",\n            \"map50\": str(round(map50, 4)).replace(\"\
+          .\", \"_\"),\n        },\n    )\n\n    print(f\"Model successfully registered!\"\
+          )\n    print(f\"Resource name: {model.resource_name}\")\n    print(f\"mAP50:\
+          \ {map50:.4f}\")\n\n"
+        image: australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v2
+    exec-train-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_model(\n    bucket_name: str,\n    model_version: str,\n\
+          \    epochs: int,\n    imgsz: int,\n):\n    \"\"\"\n    Triggers the YOLO\
+          \ training job inside the Docker container.\n    Calls trainer/train.py\
+          \ with the provided arguments\n    \"\"\"\n    import subprocess\n\n   \
+          \ print(f\"Starting training \u2014 epochs={epochs}, imgsz={imgsz}\")\n\n\
+          \    subprocess.run([\n        \"python\", \"train.py\",\n        \"--bucket-name\"\
+          ,   bucket_name,\n        \"--epochs\",        str(epochs),\n        \"\
+          --imgsz\",         str(imgsz),\n        \"--model-version\", model_version,\n\
+          \    ], check=True)\n\n    print(\"Training complete!\")\n\n"
+        image: australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v2
+        resources:
+          cpuLimit: 8.0
+          memoryLimit: 16.0
+          resourceCpuLimit: '8'
+          resourceMemoryLimit: 16G
+    exec-validate-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - validate_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef validate_data(\n    bucket_name: str, #ex: \"drill-core-sri\"\
+          \n    dataset_prefix: str, #ex: \"datasets/v1/\"\n) -> bool:\n    \"\"\"\
+          \n    Makes sure train/val/test splits all have images\n    \"\"\"\n   \
+          \ from google.cloud import storage #the dependency is imported in the environment\
+          \ where the component actually runs\n\n    print(\"Starting data validation...\"\
+          )\n\n    client = storage.Client()\n    bucket = client.bucket(bucket_name)\n\
+          \n    splits = [\"train\", \"val\", \"test\"]\n\n    for split in splits:\n\
+          \        prefix = f\"{dataset_prefix}{split}/images/\"\n        blobs =\
+          \ list(bucket.list_blobs(prefix=prefix))\n\n        if len(blobs) == 0:\n\
+          \            print(f\"ERROR: No images found in {split} split!\")\n    \
+          \        return False\n\n        print(f\"  {split}: {len(blobs)} images\
+          \ found\")\n\n    print(\"Data validation passed.\")\n    return True\n\n"
+        image: australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v2
+        resources:
+          cpuLimit: 2.0
+          memoryLimit: 4.0
+          resourceCpuLimit: '2'
+          resourceMemoryLimit: 4G
+pipelineInfo:
+  description: Validates data, trains YOLO, evaluates, and registers model (conditional)
+    to model registry
+  name: drill-core-yolo-pipeline
+root:
+  dag:
+    tasks:
+      condition-1:
+        componentRef:
+          name: comp-condition-1
+        dependentTasks:
+        - evaluate-model
+        inputs:
+          parameters:
+            pipelinechannel--bucket_name:
+              componentInputParameter: bucket_name
+            pipelinechannel--evaluate-model-Output:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: evaluate-model
+            pipelinechannel--model_version:
+              componentInputParameter: model_version
+        taskInfo:
+          name: check-map50-threshold
+        triggerPolicy:
+          condition: inputs.parameter_values['pipelinechannel--evaluate-model-Output']
+            > 0.8
+      evaluate-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-evaluate-model
+        dependentTasks:
+        - train-model
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            model_version:
+              componentInputParameter: model_version
+        taskInfo:
+          name: evaluate-model
+      train-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-model
+        dependentTasks:
+        - validate-data
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            epochs:
+              componentInputParameter: epochs
+            imgsz:
+              componentInputParameter: imgsz
+            model_version:
+              componentInputParameter: model_version
+        taskInfo:
+          name: train-model
+      validate-data:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-validate-data
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            dataset_prefix:
+              runtimeValue:
+                constant: datasets/v1/
+        taskInfo:
+          name: validate-data
+  inputDefinitions:
+    parameters:
+      bucket_name:
+        defaultValue: drill-core-sri
+        isOptional: true
+        parameterType: STRING
+      epochs:
+        defaultValue: 60.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      imgsz:
+        defaultValue: 640.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      model_version:
+        defaultValue: v1
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0

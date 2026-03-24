@@ -1,0 +1,37 @@
+gcloud init     **logs into google account and choose/create project
+gcloud auth application-default login       **authenticating so code can access google cloud
+gcloud config list      **showing current configuration
+
+**enabling API's**
+gcloud services enable \ 
+  aiplatform.googleapis.com \
+  storage.googleapis.com \
+  containerregistry.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com
+
+**create files and folders
+
+**fill up requirements.txt(inside trainer)
+
+**fill up train.py(inside trainer)
+
+**fill up docker file(inside trainer)
+
+**create artifact registry repository to store container image
+gcloud artifacts repositories create drill-core-repo \
+  --repository-format=docker \
+  --location=australia-southeast1 \
+  --description="Docker images for drill core pipeline"
+
+**build docker image in cloud and pushing image to specified location
+gcloud builds submit ./trainer \
+  --tag australia-southeast1-docker.pkg.dev/drill-core-object-detection/drill-core-repo/trainer:v1
+
+**create __init__.py, validate.py, train.py, evaluate.py, deploy.py (inside pipeline/components)
+
+**fill them
+
+**create pipeline.py and fill it (inside pipeline)
+
+python3 pipeline.py
