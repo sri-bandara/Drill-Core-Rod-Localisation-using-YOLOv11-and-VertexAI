@@ -4,6 +4,8 @@ End-to-end computer vision pipeline for detecting and localising drill core rods
 
 👉🏽 **Live demo:** [Drill Core Rod Localiser on Hugging Face Spaces](https://huggingface.co/spaces/sri-bandara/Drill-Core-Rod-Localiser-YOLOv11)
 
+![image](https://github.com/user-attachments/assets/38e13459-6afa-4b12-a682-0ef517f98a05)
+
 ---
 
 ## Overview 📍
@@ -49,5 +51,3 @@ The model assumes that input images are captured under relatively consistent con
 <img width="1216" height="773" alt="pipeline" src="https://github.com/user-attachments/assets/f35a6a91-fba1-4161-b2b4-fb14a0913224" />
 
 <img width="1456" height="830" alt="demo" src="https://github.com/user-attachments/assets/227435a9-15da-4dd9-92c3-d7ddf084245d" />
-
-![image](https://github.com/user-attachments/assets/38e13459-6afa-4b12-a682-0ef517f98a05)
